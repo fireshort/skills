@@ -24,7 +24,7 @@ Skills 是一种结构化的指令集，可以被 AI Agent 加载并执行，从
 将整个仓库克隆到你的 Agent skills 目录下：
 
 ```bash
-git clone https://github.com/yueyingspace/skills.git ~/.agents/skills
+git clone https://github.com/fireshort/skills.git ~/.agents/skills
 ```
 
 或者只复制你需要的 skill 文件夹：
