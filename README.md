@@ -16,6 +16,7 @@ Skills 是一种结构化的指令集，可以被 AI Agent 加载并执行，从
 | Skill | 说明 |
 |-------|------|
 | [dual-review](./dual-review/) | 双重评审工作流 — 同时启动内部 Agent 评审和 Codex CLI 外部评审，合并去重后呈现结果 |
+| [xibin-douyin-script-extractor](./xibin-douyin-script-extractor/) | 抖音口播文案提取 — 把抖音视频链接转成带时间戳的文案 txt/json，支持火山引擎豆包、SenseVoice、faster-whisper 三种 ASR 后端 |
 
 ## 🚀 快速开始
 
