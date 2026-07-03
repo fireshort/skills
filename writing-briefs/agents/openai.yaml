@@ -1,0 +1,4 @@
+interface:
+  display_name: "Writing Briefs"
+  short_description: "Draft high-level requirement briefs"
+  default_prompt: "Use $writing-briefs to turn this feature idea into a brief before writing the spec."
