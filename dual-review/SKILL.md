@@ -11,10 +11,12 @@ description: 双重评审工作流——同时启动 Claude Code 内部评审和
 
 **在同一条回复消息中，发出两个 Agent tool call（均设置 `run_in_background: true`）：**
 
-1. **Agent A** → Claude Code 内部评审
-2. **Agent B** → 通过 codex 插件进行外部评审
+1. **Agent A** → Claude Code 内部评审（`general-purpose`；若系统提示的可用 agent 列表中有专职评审 agent 则优先用——以列表为准判定，不靠试错）
+2. **Agent B** → Codex 外部评审（`subagent_type: codex:codex-rescue`）
 
-两路完成后汇总去重，向用户呈现合并结果。
+每个 agent 的 prompt 必须包含具体评审目标（文件路径 / git 范围）和输出要求；目标不明确时先向用户确认，禁止启动无具体目标的占位 agent。
+
+必须等两路都到达终态（成功或判定失败）再汇总；一路长期未完成时，向用户报告 pending 状态并声明该路未完成验证。
 
 ## 调用方式
 
@@ -32,38 +34,49 @@ description: 双重评审工作流——同时启动 Claude Code 内部评审和
 
 从 args 或对话上下文确定评审类型和目标。信息不足时向用户确认。
 
+评审范围按类型定义，**两路必须审同一范围**（否则合并结果有盲区）：
+
+| 评审类型 | 评审范围 |
+|----------|---------|
+| 代码（uncommitted） | git diff（含 staged）+ 未跟踪文件 |
+| 代码（branch diff） | git diff <分支>...HEAD |
+| 设计文档 / 实现计划 | 指定文件路径 |
+
 ### 步骤 2：同时启动两路评审
 
 在同一条消息中发出两个 Agent tool call，均设置 `run_in_background: true`：
 
 #### Agent A：Claude Code 内部评审
 
-选择当前可用的评审 agent（优先 `superpowers:code-reviewer`，否则 `general-purpose`）。
-
 prompt 要求：
-- 明确评审目标（文件路径 / git 范围）
-- 输出按 Critical / Important / Suggestion 分级
+- 按上表写明评审范围（uncommitted 必须明确覆盖未跟踪文件）
+- 声明「只评审、不修改文件、不调用其他评审 agent」
+- 输出以中文按 Critical / Important / Suggestion 分级
 
-#### Agent B：Codex 插件外部评审
+#### Agent B：Codex 外部评审
 
-使用 `general-purpose` agent，prompt 中指示使用 Skill 工具调用对应的 codex 插件命令：
+使用 Agent tool，`subagent_type: codex:codex-rescue`，prompt 直接写评审请求（rescue agent 是转发器，基本原样转交 Codex，仅允许收紧措辞）。
 
-| 评审类型 | Skill 调用 | args |
-|----------|-----------|------|
-| 代码（uncommitted） | `codex:review` | `--wait` |
-| 代码（branch diff） | `codex:review` | `--wait --base <分支>` |
-| 设计文档 | `codex:rescue` | `--wait 以中文评审设计文档 <路径>，关注设计合理性、风险、遗漏，按 Critical/Important/Suggestion 分级` |
-| 实现计划 | `codex:rescue` | `--wait 以中文评审实现计划 <路径>，关注可行性、遗漏、风险，按 Critical/Important/Suggestion 分级` |
+> **不要**让子代理经 Skill 工具调用 `codex:review` / `codex:adversarial-review`——这些命令带 `disable-model-invocation: true`，只能由用户手动触发，模型或子代理调用必然失败。`codex:codex-rescue` 才是插件提供的模型可调用入口。
 
-**关键**：args 中必须包含 `--wait`，确保在 agent 内前台执行（agent 本身已在后台）。
+prompt 必须包含三个要素：
+
+1. **评审范围**：按上表写明；设计文档另加关注点「设计合理性、风险、遗漏」，实现计划另加「可行性、遗漏、风险」。
+2. **`--wait`**：必须带。否则 rescue 对较大的评审会自行转后台执行，而 `codex:status` / `codex:result` 都是用户专用命令，编排方永远拿不回结果，该路评审会静默丢失。
+3. **「只评审、不修改任何文件，输出按 Critical/Important/Suggestion 分级」**：rescue 契约对 review 类请求本就不加写权限，此句显式加固该判定并约束 Codex 行为。注意这是指令级约束，不是沙箱隔离。
 
 ### 步骤 3：汇总结果
 
-两路完成后：
-1. 合并去重，按 Critical → Important → Suggestion 排序
-2. 向用户呈现合并后的评审意见
+两路都到达终态后：
+1. 合并去重：同一问题两路严重级别不同时取更高级别；两路结论冲突时并列展示并标注来源，不擅自丢弃任何一方
+2. 按 Critical → Important → Suggestion 排序，向用户呈现合并结果
 
 ### 步骤 4：处理失败
 
-- 一路失败：报告错误，使用另一路结果
-- 两路都失败：报告错误，建议手动评审
+**失败判定**：Agent B 返回为空或不含评审内容时，一律视为该路失败（rescue 契约规定调用失败时返回空）。失败信息含限额/重置时间（usage limit / session limit / rate limit）的按限额类处理，否则按其他失败处理。
+
+- **单路限额失败**：暂时性失败。向用户报告重置时间；重置后补跑同一路，**每路最多补跑 1 次**，补跑仍失败则按其失败类型报告并终止。补跑完成前必须明确声明「该路评审未完成，不算已完成验证」——限额失败不允许静默以单路结果收场。
+- **单路其他失败**：报告错误原因，用另一路结果收场，并明确说明本次只有单路评审通过（仅非限额失败允许单路收场）。错误指向 Codex 未安装/未认证时，提示用户运行 `/codex:setup`。
+- **两路都失败**：
+  - 均为限额失败 → 报告两路重置时间，重置后各补跑一次（同样受最多 1 次限制）。
+  - 含非限额失败 → 报告错误，建议用户手动补评审：`/codex:review` 只能补外部一路，内部评审需重新发起。
