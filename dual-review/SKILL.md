@@ -62,7 +62,7 @@ prompt 要求：
 prompt 必须包含三个要素：
 
 1. **评审范围**：按上表写明；设计文档另加关注点「设计合理性、风险、遗漏」，实现计划另加「可行性、遗漏、风险」。
-2. **`--wait`**：必须带。否则 rescue 对较大的评审会自行转后台执行，而 `codex:status` / `codex:result` 都是用户专用命令，编排方永远拿不回结果，该路评审会静默丢失。
+2. **`--wait`**：给 `codex:codex-rescue` 的请求必须带这个路由标志，让 rescue subagent 前台等待并返回完整 stdout；该标志是 Claude Code 执行层控制，不属于 Codex 任务正文，必须由 rescue subagent 消化后再转交 `task`。否则 rescue 对较大的评审可能转后台执行，而 `codex:status` / `codex:result` 都是用户专用命令，编排方永远拿不回结果，该路评审会静默丢失。
 3. **「只评审、不修改任何文件，输出按 Critical/Important/Suggestion 分级」**：rescue 契约对 review 类请求本就不加写权限，此句显式加固该判定并约束 Codex 行为。注意这是指令级约束，不是沙箱隔离。
 
 ### 步骤 3：汇总结果
