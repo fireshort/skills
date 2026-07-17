@@ -1,0 +1,4 @@
+interface:
+  display_name: "Writing Specs"
+  short_description: "Turn settled requirements into technical specs"
+  default_prompt: "Use $writing-specs to turn these settled requirements into a concise technical design spec."

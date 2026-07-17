@@ -13,7 +13,7 @@ Use the project's normal language for the generated brief. Keep this skill itsel
 
 ## Default Location
 
-Save briefs to `docs/superpowers/briefs/YYYY-MM-DD-<topic>-brief.md` unless project rules or the user specify another location.
+Save briefs to `docs/briefs/YYYY-MM-DD-<topic>-brief.md` unless project rules or the user specify another location. Preserve existing historical paths rather than renaming them for this skill.
 
 ## Workflow
 
