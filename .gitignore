@@ -16,3 +16,7 @@ Desktop.ini
 
 # Gemini / Agent local data
 .gemini/
+
+# Python
+__pycache__/
+*.py[cod]
