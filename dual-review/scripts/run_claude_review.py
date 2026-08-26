@@ -8,6 +8,7 @@ import base64
 import binascii
 import contextlib
 import ctypes
+import hashlib
 import io
 import json
 import os
@@ -53,6 +54,23 @@ LEGACY_END_RECEIPT_LABEL = (
     "At the very end of your response, output this receipt on its own line: "
 )
 # Only the end label changed during receipt-hardening; accept the prior emitted form.
+CLAUDE_QUOTA_PATTERNS = (
+    r"\busage limit\b",
+    r"\bsession limit\b",
+    r"\brate limit(?:ed| exceeded)?\b",
+    r"\bquota (?:exceeded|exhausted|reached)\b",
+    r"\bout of (?:credits|quota)\b",
+    r"\byou(?:'ve| have) hit (?:your|the) [^\r\n]{0,80}\blimit\b",
+    r"\b(?:429|resource exhausted)\b[^\r\n]{0,120}\b(?:quota|rate|limit)\b",
+)
+CLAUDE_STDOUT_QUOTA_PATTERN = re.compile(
+    r"\Ayou(?:'ve| have) hit your weekly limit\s*·\s*resets\s+"
+    r"(?:1[0-2]|0?[1-9])(?::[0-5]\d)?\s*(?:am|pm)\s+"
+    r"\([a-z0-9_+./-]{1,64}\)\Z",
+    flags=re.IGNORECASE,
+)
+MAX_CLAUDE_QUOTA_STDOUT_BYTES = 512
+PROMPT_SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 WINDOWS_CREATE_SUSPENDED = 0x00000004
 WINDOWS_NATIVE_SUFFIXES = {".com", ".exe"}
 POSIX_NATIVE_MAGICS = (
@@ -989,6 +1007,7 @@ def _start_review(args: argparse.Namespace) -> int:
     except PromptInputError as exc:
         raise StartReviewError(exc.error_kind, str(exc)) from exc
     prompt_bytes = len(prompt_raw)
+    prompt_sha256 = hashlib.sha256(prompt_raw).hexdigest()
 
     claude = shutil.which(args.claude_bin)
     if not claude:
@@ -1028,6 +1047,7 @@ def _start_review(args: argparse.Namespace) -> int:
             "created_at": time.time(),
             "timeout_seconds": args.timeout,
             "prompt_bytes": prompt_bytes,
+            "prompt_sha256": prompt_sha256,
         }
         write_json(state_dir / "launch.json", launch)
 
@@ -1249,6 +1269,7 @@ def run_worker(args: argparse.Namespace) -> int:
         )
         prompt, prompt_raw = read_utf8_prompt()
         prompt_bytes = len(prompt_raw)
+        prompt_sha256 = hashlib.sha256(prompt_raw).hexdigest()
 
         go_deadline = time.monotonic() + STARTING_GRACE_SECONDS
         while not go_path.exists():
@@ -1265,6 +1286,7 @@ def run_worker(args: argparse.Namespace) -> int:
             or launch.get("worker_record_before_child") is not True
             or launch.get("worker_identity") != current_worker_identity
             or launch.get("prompt_bytes") != prompt_bytes
+            or launch.get("prompt_sha256") != prompt_sha256
             or current_worker_identity is None
             or current_worker_identity != worker_identity
         ):
@@ -1934,6 +1956,96 @@ def get_status(args: argparse.Namespace) -> int:
     )
     return 0
 
+def detect_claude_quota_failure(text: str) -> str | None:
+    # stderr and worker errors are trusted failure channels, so they accept several
+    # known quota forms. Preserve physical line boundaries: folding the whole stream
+    # would let a status code on one line combine with unrelated quota prose later.
+    for line in text.splitlines():
+        normalized = " ".join(line.lower().split())
+        for pattern in CLAUDE_QUOTA_PATTERNS:
+            if re.search(pattern, normalized, flags=re.IGNORECASE):
+                return pattern
+    return None
+
+
+def classify_claude_quota_result(
+    result: dict[str, Any], stderr_text: str, worker_error: str, stdout_text: str = ""
+) -> str | None:
+    if result.get("state") != "failed" or result.get("failure_reason") != "claude_exit":
+        return None
+    matched = detect_claude_quota_failure("\n".join((stderr_text, worker_error)))
+    if matched is not None:
+        return matched
+    # Claude Code reports subscription exhaustion as one exact stdout status line.
+    # Do not broadly scan stdout: a partial review may legitimately discuss limits.
+    nonempty_lines = [line.strip() for line in stdout_text.splitlines() if line.strip()]
+    if (
+        result.get("receipt_verified") is not True
+        and len(nonempty_lines) == 1
+        and CLAUDE_STDOUT_QUOTA_PATTERN.fullmatch(nonempty_lines[0])
+    ):
+        return CLAUDE_STDOUT_QUOTA_PATTERN.pattern
+    return None
+
+
+def read_complete_quota_stdout(path: Path) -> str:
+    try:
+        # A genuine Claude subscription banner is tiny. The cap prevents a partial
+        # review body from entering the stricter one-line stdout classification path.
+        if path.stat().st_size > MAX_CLAUDE_QUOTA_STDOUT_BYTES:
+            return ""
+        return path.read_bytes().decode("utf-8", errors="strict")
+    except (FileNotFoundError, OSError, UnicodeDecodeError):
+        return ""
+
+
+def validated_prompt_sha256(value: Any) -> str | None:
+    if isinstance(value, str) and PROMPT_SHA256_PATTERN.fullmatch(value):
+        return value
+    return None
+
+
+def classify_failure(args: argparse.Namespace) -> int:
+    state_dir = Path(args.state_dir).resolve()
+    validate_helper_state_dir(state_dir)
+    _, launch = read_owned_state(state_dir)
+    result_path = state_dir / "result.json"
+    if not result_path.exists():
+        print(
+            json.dumps(
+                {
+                    "state": "unknown",
+                    "quota_limited": False,
+                    "reason": "result_missing",
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 3
+    result = read_json(result_path)
+    failure_reason = result.get("failure_reason")
+    prompt_sha256 = validated_prompt_sha256(launch.get("prompt_sha256"))
+    matched = classify_claude_quota_result(
+        result,
+        read_text_tail(state_dir / "stderr.txt", limit=8000),
+        str(result.get("worker_error") or ""),
+        read_complete_quota_stdout(state_dir / "stdout.txt"),
+    )
+    print(
+        json.dumps(
+            {
+                "state": result.get("state"),
+                "quota_limited": matched is not None and prompt_sha256 is not None,
+                "failure_reason": failure_reason,
+                "matched_pattern": matched,
+                "prompt_sha256": prompt_sha256,
+            },
+            ensure_ascii=False,
+        )
+    )
+    return 0
+
+
 def print_result(args: argparse.Namespace) -> int:
     state_dir = Path(args.state_dir).resolve()
     validate_helper_state_dir(state_dir)
@@ -2338,6 +2450,70 @@ def run_self_test(_: argparse.Namespace) -> int:
         raise SystemExit("self-test requires assertions enabled; do not use python -O")
 
     checks: list[str] = []
+    assert detect_claude_quota_failure("You've hit your usage limit") is not None
+    assert detect_claude_quota_failure("HTTP 429: rate limit exceeded") is not None
+    assert detect_claude_quota_failure("authentication required") is None
+    assert detect_claude_quota_failure("tool contract changed") is None
+    assert detect_claude_quota_failure("HTTP 429: unrelated failure\nquota noted later") is None
+    quota_result = {
+        "state": "failed",
+        "failure_reason": "claude_exit",
+        "receipt_verified": False,
+    }
+    assert (
+        classify_claude_quota_result(
+            quota_result, "You've hit your usage limit", ""
+        )
+        is not None
+    )
+    partial_stdout = "review finding: the API rate limit needs documentation"
+    assert detect_claude_quota_failure(partial_stdout) is not None
+    assert (
+        classify_claude_quota_result(
+            quota_result,
+            "",
+            "",
+            "You've hit your weekly limit · resets 8am (Asia/Shanghai)",
+        )
+        is not None
+    )
+    assert (
+        classify_claude_quota_result(
+            quota_result, "TLS connection reset", "", partial_stdout
+        )
+        is None
+    )
+    assert (
+        classify_claude_quota_result(
+            quota_result, "", "", "You've hit your design limit"
+        )
+        is None
+    )
+    assert (
+        classify_claude_quota_result(
+            quota_result,
+            "",
+            "",
+            "You've hit your weekly limit\n- resets are handled incorrectly in this API",
+        )
+        is None
+    )
+    with tempfile.TemporaryDirectory(prefix="dual-review-quota-self-test-") as raw_dir:
+        quota_path = Path(raw_dir) / "stdout.txt"
+        quota_path.write_text(
+            "You've hit your weekly limit · resets 8am (Asia/Shanghai)\n",
+            encoding="utf-8",
+        )
+        assert read_complete_quota_stdout(quota_path).startswith("You've hit")
+        quota_path.write_bytes(b"x" * (MAX_CLAUDE_QUOTA_STDOUT_BYTES + 1))
+        assert read_complete_quota_stdout(quota_path) == ""
+    checks.append("quota_failure_classification")
+    assert validated_prompt_sha256("a" * 64) == "a" * 64
+    assert validated_prompt_sha256("A" * 64) is None
+    assert validated_prompt_sha256("a" * 63) is None
+    assert validated_prompt_sha256(None) is None
+    checks.append("prompt_sha256_validation")
+
 
     class BinaryInput:
         def __init__(self, payload: bytes) -> None:
@@ -2588,6 +2764,12 @@ def build_parser() -> argparse.ArgumentParser:
     status = commands.add_parser("status", help="print review state as JSON")
     status.add_argument("--state-dir", required=True)
     status.set_defaults(func=get_status)
+
+    classify = commands.add_parser(
+        "classify-failure", help="classify a terminal Claude failure as quota-related"
+    )
+    classify.add_argument("--state-dir", required=True)
+    classify.set_defaults(func=classify_failure)
 
     result = commands.add_parser("result", help="print complete Claude stdout")
     result.add_argument("--state-dir", required=True)

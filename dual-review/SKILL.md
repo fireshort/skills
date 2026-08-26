@@ -1,6 +1,6 @@
 ---
 name: dual-review
-description: 跨 Claude Code 与 Codex 的双重评审工作流。在 Claude Code 中运行 Claude 内部评审与安装在 Claude Code 中的 Codex 插件外部评审；在 Codex 中运行 Codex 内部评审与 Claude Code CLI 外部评审。用户提出评审、review、code review、请评审、检查代码、审查，或流程要求进行 spec review、plan review、requesting-code-review 时使用。
+description: 跨 Claude Code 与 Codex 的双重评审工作流。在 Claude Code 中运行 Claude 内部评审与 Codex 插件外部评审；在 Codex 中运行 Codex 内部评审与 Claude Code CLI 外部评审，并在 Claude 明确限额失败时自动改用 Antigravity CLI 的 Claude Opus 4.6 Thinking。用户提出评审、review、code review、请评审、检查代码、审查，或流程要求进行 spec review、plan review、requesting-code-review 时使用。
 ---
 
 # 双重评审工作流
@@ -10,7 +10,7 @@ description: 跨 Claude Code 与 Codex 的双重评审工作流。在 Claude Cod
 | 当前宿主 | 内部评审 | 外部评审 |
 |----------|----------|----------|
 | Claude Code | Claude Code Agent | 安装在 Claude Code 中的 Codex 插件 `codex:codex-rescue` |
-| Codex | Codex subagent | helper 后台运行本机 Claude Code CLI `claude -p` |
+| Codex | Codex subagent | 优先由 helper 后台运行 Claude Code CLI；明确限额失败并完成 cleanup 后，自动改用 Antigravity CLI 的 Claude Opus 4.6 Thinking |
 
 本文所说的“Codex 插件”专指安装在 Claude Code 中的插件。Codex 宿主不调用该插件，也不使用 `codex:codex-rescue` 或 `--wait`；Claude Code 宿主不得调用本 skill 的 `run_claude_review.py`，避免把“Claude 评审 Claude”误报成跨产品双路评审。
 
@@ -109,13 +109,21 @@ $dual-review
 
 1. **Codex 内部评审**：使用当前 Codex 提供的 `spawn_agent` 或等价 subagent 工具启动独立 reviewer。传入完整评审目标与范围；要求只读、禁止再次调用 reviewer。保留足够的任务上下文，但不要把主 agent 的预设结论写进 prompt。若可收窄 subagent 工具或权限则必须收窄，否则适用核心规则中的评审前后 Git 核对。
 2. **Claude Code 外部评审**：先确定可用的 Python 解释器（Windows 仅接受 CPython 3.12.4 及以上版本，优先 `py -3`，再尝试 `python`；macOS/Linux 要求 Python 3.10 及以上版本，优先 `python3`，再尝试 `python`），将实际调用记为 `<python-exe>`；再运行 `<python-exe> --version`、`claude --version` 和 `claude --help`。除确认 flag 存在，还必须确认 `dontAsk` 是 `--permission-mode` 的合法值，并且 `--tools` 帮助明确说明空字符串会禁用全部工具；helper 会用相同检查再次 fail closed。所有平台都必须解析到原生 Claude Code 二进制：Windows 只接受 `.exe`/`.com`，POSIX 只接受 ELF/Mach-O；shell、command 和 script wrapper 可能丢弃空参数，helper 会以 `unsupported_claude_launcher` 拒绝启动，不得绕过。CLI 帮助文案无法证明该契约时也必须 fail closed；helper 的 `cli_contract` 错误会附带实际 `claude --version` 供诊断，但不提供绕过开关。缺失或语义不符时按步骤 4 报告。后续所有 helper 命令必须复用同一个 `<python-exe>`。`<skill-dir>` 取本次已加载的 `SKILL.md` 所在目录，不从当前仓库路径猜测。
-3. 用临时 Python builder 在内存中构造完整 review prompt，将其 UTF-8 bytes 编码为不换行的 base64，并由 builder 通过 `subprocess.run(..., input=base64_bytes)` 直接交给 helper 的 stdin；任何时候都不得把完整 prompt、base64 或源码快照写入调用方临时文件。内部 reviewer 启动后立即执行 builder：
+3. 用临时 Python builder 在内存中构造完整 review prompt，将其 UTF-8 bytes 编码为不换行的 base64，并由 builder 通过 `subprocess.run(..., input=base64_bytes)` 直接交给对应 helper 的 stdin；任何时候都不得把完整 prompt、base64 或源码快照写入调用方临时文件。内部 reviewer 启动后立即执行 builder：
 
 ```text
 <python-exe> <builder.py>
 ```
 
+4. **Antigravity 限额 fallback**：只有 Claude helper 已到 `failed` 终态、`classify-failure --state-dir <state_dir>` 返回 `quota_limited: true` 和本轮 `prompt_sha256`，并且上一轮 `cleanup` 成功后，才由 builder 用完全相同的 prompt bytes 自动调用 `<python-exe> <skill-dir>/scripts/run_antigravity_review.py run --prompt-base64-stdin --expected-prompt-sha256 <prompt_sha256>`。默认模型在 helper 内固定为 `claude-opus-4-6-thinking`，不存在公开模型覆盖参数；不得用默认路由、Sonnet、Gemini 或其他模型静默替代。认证、网络、CLI 契约、回执、编码、超时、空输出等非限额失败不得触发 fallback。Antigravity 每轮最多尝试 1 次，失败后降级为单路并报告原因。当前 Antigravity fallback 仅支持 Windows；其他平台 fail closed，不影响 Claude 主路径。
+
 使用临时 builder 脚本从已批准路径读取材料、在内存中构造 prompt。工作区与暂存区 diff 必须由 builder 通过 `subprocess.run([...], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)` 直接捕获在内存中；Git argv 必须使用 `git --no-pager -c core.fsmonitor= -c core.pager=cat -c diff.external= diff --no-ext-diff --no-textconv ...` 这一固定安全前缀，禁止触发仓库可配置的 pager、fsmonitor、external diff 或 textconv。已批准的未跟踪文件用 `Path.read_bytes()` 读取并严格按 UTF-8 解码。随后执行 `subprocess.run([<python-exe>, "<skill-dir>/scripts/run_claude_review.py", "start", "--cwd", <仓库根目录>, "--prompt-base64-stdin"], input=base64.b64encode(prompt.encode("utf-8")), stdout=subprocess.PIPE, stderr=subprocess.PIPE)`，再把 helper 的 stdout/stderr 以二进制转发给宿主。这样 Windows 与 POSIX 都不依赖 shell 管道。禁止 `git diff > 临时文件` 或其他源码快照落盘。builder 只能包含模板、已批准路径和固定 argv，不能嵌入源码、diff 或敏感内容，执行后立即删除；禁止用 PowerShell 字符串管道、普通 `print()` 或依赖 `$OutputEncoding` 的文本输出生成传输流。base64 必须是不插入任何空白的不换行形式；helper 会先严格校验并解码，再把原始 UTF-8 bytes 经二进制 pipe 传给 worker 与 Claude。非法 base64、非法 UTF-8、空输入、超过解码后上限的输入，以及因换行或空白导致 base64 传输尺寸超过上限，都会在启动 Claude 前 fail closed。helper 不接受 prompt 文件，也不把快照或 base64 写入 state directory。
+
+Antigravity fallback 必须重建完全相同的 prompt bytes，并把 `classify-failure` 返回的 SHA-256 传给 helper；hash 不同就拒绝启动。builder 可通过 `--antigravity-bin <绝对路径>` 指定新安装但尚未进入当前 PATH 的 `agy`；helper 在 Windows 还会检查 `%LOCALAPPDATA%/agy/bin/agy.exe`。helper 会验证 `agy --help` 与 `agy models`，固定 Opus slug，在私有空目录中启用 Windows AppContainer `--sandbox` 和 `--disable-slash-commands`。启动前还会读取全局 Antigravity 设置：只接受 `request-review` / `strict`，且 `permissions.allow` 必须为空；启动后的 `init.cwd`、`permission_mode`、模型和事件类型继续严格核对。私有工作区内读写虽由 agy 自动放行，但其中只有本轮日志且结束后删除；命令、浏览器、URL、MCP 与非工作区访问在 headless 下因无交互审批而 soft-deny。输出使用固定 `--json-schema`，要求非空 `review` 与中性枚举 `decision: pass|revise`，并同时核对 `init.json_schema`、`result.json_schema` 和只含这两个字段的 `structured_output`。自由文本 `response` 不作为评审来源：agy 1.1.21 实测会在其中注入 schema 外的内部展示字段，而 `structured_output` 才是 CLI 按 schema 解析后的权威值。主流程按当前评审类型确定性映射 decision：代码对应“可合并 / 需修改后再合并”，设计与计划对应“可进入实现 / 需修改后再进入实现”，不得让模型自由改写 Gate 语义。`checkpoint` / `finish` 仅在状态合法且没有 `tool_name`、`tool_info`、`subagent_info` 时接受；任何未知 step、真实工具/子 agent、非成功终态、schema 不一致、无效结构化输出或非 UTF-8 输出都判失败。它不会把仓库作为 Antigravity workspace，也不会复用 Claude 的 state directory。
+
+Antigravity helper 是同步进程；用宿主的 exec session 或等价机制等待，仍按 10–30 秒间隔获取新输出，不启动第二个 fallback。Windows 下先把 helper 自身加入 kill-on-close Job Object，再创建 agy；子进程在创建时原子继承 Job，消除 `Popen` 返回到事后分配 Job 之间的强杀窗口。helper 正常结束时由系统关闭句柄，宿主强杀时 Job 同时终止 agy 进程树；超时或取消仍先收口直属 `Popen`。官方 headless 契约默认不续接会话；完整 prompt、base64 和源码快照仍不得进入 argv、调用方日志或临时文件。helper 自有 `agy.log` 位于带随机 ownership 的私有 work dir：state owner 与 work marker 必须用同一 token、协议版本和规范化路径双向绑定，正常终态核对后立即删除；宿主被强杀导致 `finally` 未执行时，下次可由 `sweep` 在核实 ownership 与 helper/agy PID 创建 identity 都已终止后安全清理。
+
+当前会话首次调用 Antigravity fallback 前运行 `<python-exe> "<skill-dir>/scripts/run_antigravity_review.py" sweep --older-than 86400`。它只扫描系统 TEMP 下 `dual-review-antigravity-*` state 目录，校验 owner token、协议版本、work dir 反向 marker 和进程 identity；处于 `spawning_child` 却没有原子 Job 保证的记录一律拒绝清理。`cleaned` 可记录，`refused` 必须报告，不能手工批量删除。`run` 正常失败只向 stderr 输出一个 JSON；若同时 cleanup 失败，该 JSON 的 `error_kind=cleanup_failed`，并包含 `primary_error_kind`、`state_dir`、`work_dir`，不得只解析或报告主错误。
 
 helper 以独立后台进程运行 `claude -p`，启用 `--safe-mode`、`--permission-mode dontAsk`、`--no-session-persistence`、`--no-chrome` 和 `--output-format text`，并用 `--tools ""` 禁用全部工具。`--cwd` 只用于记录被评审仓库；Claude 子进程实际运行在系统 TEMP 下另一个与 state directory 没有父子关系、名称随机且初始为空的私有工作目录。该目录分离能避免从当前工作目录直接看到控制文件，但不是操作系统级文件系统隔离；安全边界仍依赖 safe mode、禁用全部工具以及只向 prompt 放入已批准快照。stdout/stderr 在 cleanup 前仍保存在 state directory。helper 用首尾两个随机回执检测投递截断与首尾输出截断，并严格按 UTF-8 解码 Claude 输出；首尾非空行可使用裸回执 token、原样带 helper 发出的固定指令前缀，或仅在最外层带 Markdown 的反引号/强调符号；附加其他文本、缺少任一回执、输出解码失败或回执之间没有评审正文时该路直接失败。`result` 通过二进制 stdout 原样返回合法 UTF-8 结果，避免 Windows 文本换行转换；回执不用于防护快照自身的 prompt injection，也不能证明模型正文中间没有自行省略。
 
@@ -134,6 +142,7 @@ helper 以独立后台进程运行 `claude -p`，启用 `--safe-mode`、`--permi
 - Codex 路径不调用 Codex 插件，不给 Claude CLI 传 `--wait`，也不使用 Claude TUI 的近期日志代替完整 stdout。
 - worker 启动后、读取 prompt 前先持久化 `bootstrapping` PID/identity；创建 Claude 前再写 `spawning_child`，创建后立即记录 PID/PGID，再建立 Job/watchdog。任何启动窗口缺少可核验 worker 记录时，cleanup 都必须保留 state directory 与独立工作目录。POSIX 下在读取 Claude identity 前就记录 PGID；active leader 只有 identity 与仅由该子进程继承的随机环境标记都匹配时才能触发组信号。无法核验进程组、identity 或 marker 时不得发送组信号，但 worker 仍须先安全终止自己持有且尚未回收的直属 Claude 子进程。Linux 会把 zombie 视为已退出并在组探测前回收直属 leader；只有 watchdog 监督路径在 zombie leader 的 identity 仍匹配且同组后代仍存活时，才允许不依赖已不可读的 marker 继续监督原进程组。leader 已被回收、identity 无法再验证时不得仅凭旧 PGID 发信号。watchdog 监督进程关闭超时但未确认退出时必须保留其 PID/identity，不能因引用丢失而放宽 cleanup。
 - 安装、升级或修改 helper 后运行 `<python-exe> "<skill-dir>/scripts/run_claude_review.py" self-test`。不得使用 `python -O` 或设置 `PYTHONOPTIMIZE`；helper 会拒绝关闭断言的运行方式。该命令不调用 Claude、不读取评审快照，只验证 base64/UTF-8、回执、规范化后的成对目录、startup grace，以及当前 POSIX 平台可用时带后代的进程组终止、leader 已回收后的 fail-closed 与 Linux zombie 识别。
+- 安装、升级或修改 Antigravity helper 后还必须运行 `<python-exe> "<skill-dir>/scripts/run_antigravity_review.py" self-test`。该自测不调用 `agy`；交付前若本机已安装并认证 `agy`，再用无敏感内容的最小 prompt 做一次真实冒烟。真实冒烟因网络、认证或额度不可用时必须明确报告，不得用离线自测冒充。
 - 非 Windows 平台若 Codex 沙箱阻止启动独立后台进程或写入系统临时目录，在遵守上面“同一用户、同一临时目录根”的前提下，按宿主审批机制申请最小范围提权后原样重试；Windows 必须遵守上面的首次调用即最小提权规则。
 
 ## 步骤 3：收集并汇总
@@ -151,6 +160,8 @@ helper 以独立后台进程运行 `claude -p`，启用 `--safe-mode`、`--permi
 3. 状态为 `done` 后运行 `<python-exe> "<skill-dir>/scripts/run_claude_review.py" result --state-dir "<state_dir>"`，按 UTF-8 读取完整 stdout；状态为 `failed` 时也运行同一命令，读取已保存的完整或部分 stdout、stderr。Claude 输出不是 UTF-8 时，`result` 会在 stdout 给出带替换字符的诊断副本、在 stderr 标明编码错误并返回非零；不得把该副本当作成功评审。极少数回执已验证、但随后写回结果或监督收口发生异常的路径会出现 `failed` 且 `receipt_verified: true`；此时正文首尾完整，可作为带失败标记的降级材料，但不能把该路判为成功。评审成败只按 `status` 输出 JSON 的 `state` 判断；命令非零退出码只表示 helper 命令自身未完整回收结果，不能代替 `state`。`done` 同时带 `supervision_error` 时，评审正文和回执仍可用，但必须报告监督进程异常；在 cleanup 的进程终态门禁通过前不能声称监督链已完整收口。
 4. 用户取消评审或主流程中止时，运行 `<python-exe> "<skill-dir>/scripts/run_claude_review.py" stop --state-dir "<state_dir>"`；该命令只写入带随机 ownership token 的取消请求，由原 worker 终止自己创建的 Claude 进程树，不按外部传入的 PID 发信号。stop 返回 `unknown` 时不要据此判定成功或失败，也不要直接拼接通用杀进程命令；继续按第 1 项轮询 status，直到终态或按 pending 上报。
 5. 结果收集完成后运行 `<python-exe> "<skill-dir>/scripts/run_claude_review.py" cleanup --state-dir "<state_dir>"`。cleanup 会校验随机 ownership token、系统临时目录边界、独立工作目录边界、进程创建身份和 worker/Claude/watchdog 进程组终态；正常终态会短暂等待 worker 退出，机器重启或 PID 复用不会把无关进程误判为本轮进程，通过全部门禁后同时移除 state directory 与独立工作目录。startup grace 内的 `starting`、`running`、`unknown`、`spawning_child` 或遗留子进程未结束时不得清理；超过 grace 的 `starting` 仍须按第 1 项核验三种早期退出证据，launch 侧也无法核验 worker 身份时不得清理。`stale: true` 表示已证明 worker 在创建 Claude 前退出，`incomplete: true` 表示状态目录在初始化时中断，两者都已安全清理。cleanup 被拒绝时，helper 会报告 `state_dir`、已校验的 `work_dir`（无法安全解析时为 `null`）和拒绝原因；必须向用户说明其中可能仍含评审输出或控制状态。只有用户确认且进程终态已人工核实后，才可同时手动删除这两个精确目录；不得只删除 state directory 而把独立工作目录遗留在 TEMP 中。
+
+Claude helper 到达 `failed` 后，在 cleanup 前先运行 `classify-failure --state-dir "<state_dir>"`。分类器扫描 Claude stderr 与 worker error；stdout 不做宽泛关键词扫描，只在 `claude_exit`、回执未验证、文件不超过 512 bytes、严格 UTF-8 完整读取后恰好一个非空物理行，且该行精确符合本机已实测的 Claude Code weekly-limit + reset time/timezone 格式时认定 quota，避免把正文里讨论“rate limit”的评审误判为额度失败。其他限额文案在未经实测并加入回归前 fail closed。分类命令只有退出码 0 才产生有效分类；任何非零退出（包括 stdout JSON 写着 `reason: result_missing`）都表示分类器自身未完成，不得据其触发 fallback。只有它输出 `quota_limited: true` 且 `prompt_sha256` 是严格小写 64 位十六进制值才记录 fallback 条件；随后仍必须成功执行 cleanup。重新构造快照后把同一个 SHA-256 交给 Antigravity helper，hash 不同不得发送。Antigravity 成功 stdout 是 helper 从已校验 `structured_output.review` 与 `decision` 确定性拼出的完整外部评审；主流程再按当前评审类型映射最终 Gate。非零退出时 stderr 的 JSON `error_kind` 是该路失败原因，不把部分事件流、自由文本 response 或日志当作评审结果。
 
 状态字段按以下边界处理，不能把诊断字段当成成功信号：
 
@@ -171,7 +182,8 @@ helper 以独立后台进程运行 `claude -p`，启用 `--safe-mode`、`--permi
 
 ## 步骤 4：处理失败
 
-- **限额失败**：识别 usage limit / session limit / rate limit 和重置时间。每路最多补跑 1 次；重置时间尚未到时不长时间阻塞等待，报告「该路评审未完成，不算已完成验证」。补跑前必须先对上一轮 `state_dir` 执行 cleanup；helper 拒绝 cleanup 或宿主审批导致 cleanup 未能执行时都停止自动补跑，先报告遗留路径和原因。
+- **Claude 限额失败**：以 helper 的 `classify-failure` 为唯一自动 fallback 判据，不靠主 agent 自由解释错误文本。分类为限额且 cleanup 成功后，不等待 Claude 重置、不重跑 Claude，自动调用 Antigravity Opus 4.6 Thinking 一次。分类不是限额、分类命令失败或 cleanup 未完成时不得调用 Antigravity。
+- **Antigravity 失败**：不再自动切换 Sonnet、Gemini 或其他 provider。报告单一错误 JSON 的 `error_kind`、实际 stderr/退出码；`cleanup_failed` 还必须报告 `primary_error_kind` 与精确 state/work dir，并在确认进程终态后交给 `sweep`，不得直接删除。`antigravity_missing` 时给出安装或 PATH 恢复方式，认证失败时提示先交互登录，模型不可用时报告固定 slug，不得删掉模型固定或放宽工具边界。该路评审未完成，不算已完成验证。
 - **Claude Code 宿主的 Codex 外部路失败**：若提示插件未安装或未认证，提示用户运行 `/codex:setup`。
 - **Codex 宿主的 Claude 外部路失败**：先报告 `start` 的 `error_kind`、实际 stderr 或退出码。命令不存在时说明需安装 Claude Code；未认证时先核对当前 `claude --help` 和 `claude auth --help`，再提示其中实际存在的登录入口，不写死或猜测子命令；Python 运行时过旧、base64/UTF-8 输入无效、CLI 契约不兼容或只找到非原生 launcher 时报告支持边界并停止。`cli_contract` 还应报告 helper 附带的 Claude 版本，不能以文案漂移为由跳过 fail-closed 检查；输入无效时检查 builder 是否用 `subprocess.run(..., input=base64.b64encode(...))` 直接传入不含换行或空白的 bytes，不得改用 PowerShell 文本管道、宽松解码或绕过工具禁用检查。`start` 返回非空 `state_dir` 时，仍须按步骤 3 清理或报告 cleanup 被拒绝。
 - **单路非限额失败**：可以用另一路结果收场，但必须明确降级为单路评审，并说明失败原因和未覆盖风险。
