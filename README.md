@@ -16,6 +16,7 @@ Skills 是一种结构化的指令集，可以被 AI Agent 加载并执行，从
 | Skill | 说明 |
 |-------|------|
 | [dual-review](./dual-review/) | 跨 Claude Code 与 Codex 的双重评审：当前宿主内部评审 + 另一产品外部评审，合并去重后呈现结果 |
+| [english-learning-card-image](./english-learning-card-image/) | 英语好句双语配图学习卡：生成、定向编辑、评估与提示词，强调清新风格、准确文字和记忆锚点 |
 | [xibin-douyin-script-extractor](./xibin-douyin-script-extractor/) | 抖音口播文案提取 — 把抖音视频链接转成带时间戳的文案 txt/json，支持火山引擎豆包、SenseVoice、faster-whisper 三种 ASR 后端 |
 
 ## 🚀 快速开始
