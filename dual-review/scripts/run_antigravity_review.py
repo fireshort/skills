@@ -22,7 +22,7 @@ from typing import Any
 import run_claude_review as lifecycle
 
 
-DEFAULT_MODEL = "claude-opus-4-6-thinking"
+DEFAULT_MODEL = "gemini-4-neon-high"
 DEFAULT_TIMEOUT_SECONDS = 1800
 STATE_PREFIX = "dual-review-antigravity-"
 WORK_PREFIX = "dual-review-work-antigravity-"

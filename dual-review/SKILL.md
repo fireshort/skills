@@ -1,6 +1,6 @@
 ---
 name: dual-review
-description: 跨 Claude Code 与 Codex 的双重评审工作流。在 Claude Code 中运行 Claude 内部评审与 Codex 插件外部评审；在 Codex 中运行 Codex 内部评审与 Claude Code CLI 外部评审，并在 Claude 明确限额失败时自动改用 Antigravity CLI 的 Claude Opus 4.6 Thinking。用户提出评审、review、code review、请评审、检查代码、审查，或流程要求进行 spec review、plan review、requesting-code-review 时使用。
+description: 跨 Claude Code 与 Codex 的双重评审工作流。在 Claude Code 中运行 Claude 内部评审与 Codex 插件外部评审；在 Codex 中运行 Codex 内部评审与 Claude Code CLI 外部评审，并在 Claude 明确限额失败时自动改用 Antigravity CLI 的 Gemini 4 Neon（High）。用户提出评审、review、code review、请评审、检查代码、审查，或流程要求进行 spec review、plan review、requesting-code-review 时使用。
 ---
 
 # 双重评审工作流
@@ -10,7 +10,7 @@ description: 跨 Claude Code 与 Codex 的双重评审工作流。在 Claude Cod
 | 当前宿主 | 内部评审 | 外部评审 |
 |----------|----------|----------|
 | Claude Code | Claude Code Agent | 安装在 Claude Code 中的 Codex 插件 `codex:codex-rescue` |
-| Codex | Codex subagent | 优先由 helper 后台运行 Claude Code CLI；明确限额失败并完成 cleanup 后，自动改用 Antigravity CLI 的 Claude Opus 4.6 Thinking |
+| Codex | Codex subagent | 优先由 helper 后台运行 Claude Code CLI；明确限额失败并完成 cleanup 后，自动改用 Antigravity CLI 的 Gemini 4 Neon（High） |
 
 本文所说的“Codex 插件”专指安装在 Claude Code 中的插件。Codex 宿主不调用该插件，也不使用 `codex:codex-rescue` 或 `--wait`；Claude Code 宿主不得调用本 skill 的 `run_claude_review.py`，避免把“Claude 评审 Claude”误报成跨产品双路评审。
 
@@ -115,11 +115,11 @@ $dual-review
 <python-exe> <builder.py>
 ```
 
-4. **Antigravity 限额 fallback**：只有 Claude helper 已到 `failed` 终态、`classify-failure --state-dir <state_dir>` 返回 `quota_limited: true` 和本轮 `prompt_sha256`，并且上一轮 `cleanup` 成功后，才由 builder 用完全相同的 prompt bytes 自动调用 `<python-exe> <skill-dir>/scripts/run_antigravity_review.py run --prompt-base64-stdin --expected-prompt-sha256 <prompt_sha256>`。默认模型在 helper 内固定为 `claude-opus-4-6-thinking`，不存在公开模型覆盖参数；不得用默认路由、Sonnet、Gemini 或其他模型静默替代。认证、网络、CLI 契约、回执、编码、超时、空输出等非限额失败不得触发 fallback。Antigravity 每轮最多尝试 1 次，失败后降级为单路并报告原因。当前 Antigravity fallback 仅支持 Windows；其他平台 fail closed，不影响 Claude 主路径。
+4. **Antigravity 限额 fallback**：只有 Claude helper 已到 `failed` 终态、`classify-failure --state-dir <state_dir>` 返回 `quota_limited: true` 和本轮 `prompt_sha256`，并且上一轮 `cleanup` 成功后，才由 builder 用完全相同的 prompt bytes 自动调用 `<python-exe> <skill-dir>/scripts/run_antigravity_review.py run --prompt-base64-stdin --expected-prompt-sha256 <prompt_sha256>`。默认模型在 helper 内固定为 `gemini-4-neon-high`，不存在公开模型覆盖参数；禁止静默切换到默认路由、其他推理档位或模型。认证、网络、CLI 契约、回执、编码、超时、空输出等非限额失败不得触发 fallback。Antigravity 每轮最多尝试 1 次，失败后降级为单路并报告原因。当前 Antigravity fallback 仅支持 Windows；其他平台 fail closed，不影响 Claude 主路径。
 
 使用临时 builder 脚本从已批准路径读取材料、在内存中构造 prompt。工作区与暂存区 diff 必须由 builder 通过 `subprocess.run([...], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)` 直接捕获在内存中；Git argv 必须使用 `git --no-pager -c core.fsmonitor= -c core.pager=cat -c diff.external= diff --no-ext-diff --no-textconv ...` 这一固定安全前缀，禁止触发仓库可配置的 pager、fsmonitor、external diff 或 textconv。已批准的未跟踪文件用 `Path.read_bytes()` 读取并严格按 UTF-8 解码。随后执行 `subprocess.run([<python-exe>, "<skill-dir>/scripts/run_claude_review.py", "start", "--cwd", <仓库根目录>, "--prompt-base64-stdin"], input=base64.b64encode(prompt.encode("utf-8")), stdout=subprocess.PIPE, stderr=subprocess.PIPE)`，再把 helper 的 stdout/stderr 以二进制转发给宿主。这样 Windows 与 POSIX 都不依赖 shell 管道。禁止 `git diff > 临时文件` 或其他源码快照落盘。builder 只能包含模板、已批准路径和固定 argv，不能嵌入源码、diff 或敏感内容，执行后立即删除；禁止用 PowerShell 字符串管道、普通 `print()` 或依赖 `$OutputEncoding` 的文本输出生成传输流。base64 必须是不插入任何空白的不换行形式；helper 会先严格校验并解码，再把原始 UTF-8 bytes 经二进制 pipe 传给 worker 与 Claude。非法 base64、非法 UTF-8、空输入、超过解码后上限的输入，以及因换行或空白导致 base64 传输尺寸超过上限，都会在启动 Claude 前 fail closed。helper 不接受 prompt 文件，也不把快照或 base64 写入 state directory。
 
-Antigravity fallback 必须重建完全相同的 prompt bytes，并把 `classify-failure` 返回的 SHA-256 传给 helper；hash 不同就拒绝启动。builder 可通过 `--antigravity-bin <绝对路径>` 指定新安装但尚未进入当前 PATH 的 `agy`；helper 在 Windows 还会检查 `%LOCALAPPDATA%/agy/bin/agy.exe`。helper 会验证 `agy --help` 与 `agy models`，固定 Opus slug，在私有空目录中启用 Windows AppContainer `--sandbox` 和 `--disable-slash-commands`。启动前还会读取全局 Antigravity 设置：只接受 `request-review` / `strict`，且 `permissions.allow` 必须为空；启动后的 `init.cwd`、`permission_mode`、模型和事件类型继续严格核对。私有工作区内读写虽由 agy 自动放行，但其中只有本轮日志且结束后删除；命令、浏览器、URL、MCP 与非工作区访问在 headless 下因无交互审批而 soft-deny。输出使用固定 `--json-schema`，要求非空 `review` 与中性枚举 `decision: pass|revise`，并同时核对 `init.json_schema`、`result.json_schema` 和只含这两个字段的 `structured_output`。自由文本 `response` 不作为评审来源：agy 1.1.21 实测会在其中注入 schema 外的内部展示字段，而 `structured_output` 才是 CLI 按 schema 解析后的权威值。主流程按当前评审类型确定性映射 decision：代码对应“可合并 / 需修改后再合并”，设计与计划对应“可进入实现 / 需修改后再进入实现”，不得让模型自由改写 Gate 语义。`checkpoint` / `finish` 仅在状态合法且没有 `tool_name`、`tool_info`、`subagent_info` 时接受；任何未知 step、真实工具/子 agent、非成功终态、schema 不一致、无效结构化输出或非 UTF-8 输出都判失败。它不会把仓库作为 Antigravity workspace，也不会复用 Claude 的 state directory。
+Antigravity fallback 必须重建完全相同的 prompt bytes，并把 `classify-failure` 返回的 SHA-256 传给 helper；hash 不同就拒绝启动。builder 可通过 `--antigravity-bin <绝对路径>` 指定新安装但尚未进入当前 PATH 的 `agy`；helper 在 Windows 还会检查 `%LOCALAPPDATA%/agy/bin/agy.exe`。helper 会验证 `agy --help` 与 `agy models`，固定 Neon High slug，在私有空目录中启用 Windows AppContainer `--sandbox` 和 `--disable-slash-commands`。启动前还会读取全局 Antigravity 设置：只接受 `request-review` / `strict`，且 `permissions.allow` 必须为空；启动后的 `init.cwd`、`permission_mode`、模型和事件类型继续严格核对。私有工作区用于本轮运行和日志，结束后删除。AGY 1.5.12 实测在 `request-review` 下仍可能写入私有工作区，`init.permission_mode` 也不证明运行时 `agentMode`。headless 会拒绝需要交互审批的工具调用，并继续本轮运行（soft-deny）。输出使用固定 `--json-schema`，要求非空 `review` 与中性枚举 `decision: pass|revise`，并同时核对 `init.json_schema`、`result.json_schema` 和只含这两个字段的 `structured_output`。自由文本 `response` 不作为评审来源：agy 1.1.21 实测会在其中注入 schema 外的内部展示字段，而 `structured_output` 才是 CLI 按 schema 解析后的权威值。主流程按当前评审类型确定性映射 decision：代码对应“可合并 / 需修改后再合并”，设计与计划对应“可进入实现 / 需修改后再进入实现”，不得让模型自由改写 Gate 语义。`checkpoint` / `finish` 仅在状态合法且没有 `tool_name`、`tool_info`、`subagent_info` 时接受；任何未知 step、真实工具/子 agent、非成功终态、schema 不一致、无效结构化输出或非 UTF-8 输出都判失败。它不会把仓库作为 Antigravity workspace，也不会复用 Claude 的 state directory。
 
 Antigravity helper 是同步进程；用宿主的 exec session 或等价机制等待，仍按 10–30 秒间隔获取新输出，不启动第二个 fallback。Windows 下先把 helper 自身加入 kill-on-close Job Object，再创建 agy；子进程在创建时原子继承 Job，消除 `Popen` 返回到事后分配 Job 之间的强杀窗口。helper 正常结束时由系统关闭句柄，宿主强杀时 Job 同时终止 agy 进程树；超时或取消仍先收口直属 `Popen`。官方 headless 契约默认不续接会话；完整 prompt、base64 和源码快照仍不得进入 argv、调用方日志或临时文件。helper 自有 `agy.log` 位于带随机 ownership 的私有 work dir：state owner 与 work marker 必须用同一 token、协议版本和规范化路径双向绑定，正常终态核对后立即删除；宿主被强杀导致 `finally` 未执行时，下次可由 `sweep` 在核实 ownership 与 helper/agy PID 创建 identity 都已终止后安全清理。
 
@@ -182,8 +182,8 @@ Claude helper 到达 `failed` 后，在 cleanup 前先运行 `classify-failure -
 
 ## 步骤 4：处理失败
 
-- **Claude 限额失败**：以 helper 的 `classify-failure` 为唯一自动 fallback 判据，不靠主 agent 自由解释错误文本。分类为限额且 cleanup 成功后，不等待 Claude 重置、不重跑 Claude，自动调用 Antigravity Opus 4.6 Thinking 一次。分类不是限额、分类命令失败或 cleanup 未完成时不得调用 Antigravity。
-- **Antigravity 失败**：不再自动切换 Sonnet、Gemini 或其他 provider。报告单一错误 JSON 的 `error_kind`、实际 stderr/退出码；`cleanup_failed` 还必须报告 `primary_error_kind` 与精确 state/work dir，并在确认进程终态后交给 `sweep`，不得直接删除。`antigravity_missing` 时给出安装或 PATH 恢复方式，认证失败时提示先交互登录，模型不可用时报告固定 slug，不得删掉模型固定或放宽工具边界。该路评审未完成，不算已完成验证。
+- **Claude 限额失败**：以 helper 的 `classify-failure` 为唯一自动 fallback 判据，不靠主 agent 自由解释错误文本。分类为限额且 cleanup 成功后，不等待 Claude 重置、不重跑 Claude，自动调用 Antigravity 的 Gemini 4 Neon（High）一次。分类不是限额、分类命令失败或 cleanup 未完成时不得调用 Antigravity。
+- **Antigravity 失败**：禁止自动改用其他模型、推理档位或 provider。报告单一错误 JSON 的 `error_kind`、实际 stderr/退出码；`cleanup_failed` 还必须报告 `primary_error_kind` 与精确 state/work dir，并在确认进程终态后交给 `sweep`，不得直接删除。`antigravity_missing` 时给出安装或 PATH 恢复方式，认证失败时提示先交互登录，模型不可用时报告固定 slug，不得删掉模型固定或放宽工具边界。该路评审未完成，不算已完成验证。
 - **Claude Code 宿主的 Codex 外部路失败**：若提示插件未安装或未认证，提示用户运行 `/codex:setup`。
 - **Codex 宿主的 Claude 外部路失败**：先报告 `start` 的 `error_kind`、实际 stderr 或退出码。命令不存在时说明需安装 Claude Code；未认证时先核对当前 `claude --help` 和 `claude auth --help`，再提示其中实际存在的登录入口，不写死或猜测子命令；Python 运行时过旧、base64/UTF-8 输入无效、CLI 契约不兼容或只找到非原生 launcher 时报告支持边界并停止。`cli_contract` 还应报告 helper 附带的 Claude 版本，不能以文案漂移为由跳过 fail-closed 检查；输入无效时检查 builder 是否用 `subprocess.run(..., input=base64.b64encode(...))` 直接传入不含换行或空白的 bytes，不得改用 PowerShell 文本管道、宽松解码或绕过工具禁用检查。`start` 返回非空 `state_dir` 时，仍须按步骤 3 清理或报告 cleanup 被拒绝。
 - **单路非限额失败**：可以用另一路结果收场，但必须明确降级为单路评审，并说明失败原因和未覆盖风险。

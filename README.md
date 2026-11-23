@@ -33,6 +33,7 @@ Skills 是一种结构化的指令集，可以被 AI Agent 加载并执行，从
   2. 安装本机 Claude Code CLI。已有旧版 CLI 时可执行 `claude install stable` 安装原生构建。
   3. Windows 运行 `py -3 --version`、`claude --version`、`claude --help` 和 `where.exe claude`；macOS/Linux 使用 `python3 --version`、`claude --version`、`claude --help` 和 `command -v claude`。help 中须包含 `--safe-mode`、`--permission-mode`、`--tools`、`--append-system-prompt`、`--no-session-persistence`、`--no-chrome`、`--output-format`、`-p` 或 `--print`，并明确 `dontAsk` 和空字符串禁用全部工具。
   4. 安装、升级或修改 helper 后运行 self-test；Windows 使用 `py -3 dual-review/scripts/run_claude_review.py self-test`，macOS/Linux 使用 `python3 dual-review/scripts/run_claude_review.py self-test`。它不会调用 Claude 或读取评审快照，也不得在 `python -O` / `PYTHONOPTIMIZE` 下运行。
+  5. Windows 上，Claude 明确限额且清理完成后，外部评审自动改用 Antigravity CLI 的 Gemini 4 Neon（High）。用 `agy models` 确认当前账户有 `gemini-4-neon-high`。修改 AGY helper 后运行 `py -3 dual-review/scripts/run_antigravity_review.py self-test`，并用合成内容完成一次真实冒烟。
 
 安全边界：helper 只接受原生 Claude Code 二进制（Windows `.exe`/`.com`，POSIX ELF/Mach-O），并会再次检查上述 CLI 契约。不能证明 `--tools ""` 空参数会完整保留的 command、shell 或 script wrapper 将被拒绝。Codex 宿主必须用 Python builder 将 prompt 的 UTF-8 bytes 编码成不换行 base64，并通过 `subprocess.run(..., input=base64_bytes)` 直接传给 `--prompt-base64-stdin`；不要使用 PowerShell 文本管道或普通 `print()`。Claude 在与控制状态无父子关系的独立随机临时工作目录运行，但这不是操作系统级文件隔离；主要边界仍是 safe mode、禁用全部工具与只传入批准快照。helper 的 stdout/stderr 固定为 UTF-8，`result` 对合法输出使用二进制 stdout 保留原始换行；调用方也必须按 UTF-8 捕获。为保留 Claude Code 的 CLI 认证与正常运行环境，Claude 子进程会继承宿主环境变量；“禁止发送密钥/token”约束的是评审 prompt 和快照内容，不代表操作系统级环境隔离。
 
