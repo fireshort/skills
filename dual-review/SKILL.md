@@ -1,16 +1,17 @@
 ---
 name: dual-review
-description: 跨 Claude Code 与 Codex 的双重评审工作流。在 Claude Code 中运行 Claude 内部评审与 Codex 插件外部评审；在 Codex 中运行 Codex 内部评审与 Claude Code CLI 外部评审，并在 Claude 明确限额失败时自动改用 Antigravity CLI 的 Gemini 4 Neon（High）。用户提出评审、review、code review、请评审、检查代码、审查，或流程要求进行 spec review、plan review、requesting-code-review 时使用。
+description: Claude Code、Codex、Antigravity 的双重评审工作流。Claude Code 用 Codex 插件做外部评审，Antigravity 用 Codex CLI 做外部评审，Codex 用 Claude Code CLI 做外部评审并在明确限额时回退到 Antigravity CLI 的 Gemini 4 Neon（High）。用户提出评审、review、code review、请评审、检查代码、审查，或流程要求进行 spec review、plan review、requesting-code-review 时使用。
 ---
 
 # 双重评审工作流
 
-在当前宿主中启动一条内部评审，再调用另一产品完成独立外部评审。先识别当前宿主，再选择对应路径；严禁混用两端专属工具。
+先识别当前宿主，再启动内部评审，并调用另一产品完成独立外部评审。各宿主使用下表中的入口。
 
 | 当前宿主 | 内部评审 | 外部评审 |
 |----------|----------|----------|
 | Claude Code | Claude Code Agent | 安装在 Claude Code 中的 Codex 插件 `codex:codex-rescue` |
 | Codex | Codex subagent | 优先由 helper 后台运行 Claude Code CLI；明确限额失败并完成 cleanup 后，自动改用 Antigravity CLI 的 Gemini 4 Neon（High） |
+| Antigravity | Antigravity subagent 或当前 Antigravity agent | 本地 Codex CLI 的 `codex exec` |
 
 本文所说的“Codex 插件”专指安装在 Claude Code 中的插件。Codex 宿主不调用该插件，也不使用 `codex:codex-rescue` 或 `--wait`；Claude Code 宿主不得调用本 skill 的 `run_claude_review.py`，避免把“Claude 评审 Claude”误报成跨产品双路评审。
 
@@ -26,7 +27,7 @@ description: 跨 Claude Code 与 Codex 的双重评审工作流。在 Claude Cod
 
 ## 调用方式
 
-Claude Code：
+Claude Code 和 Antigravity：
 
 ```text
 /dual-review code --uncommitted [主题名]
@@ -71,7 +72,7 @@ $dual-review
 
 - 评审目标和精确范围。
 - 「你是 `dual-review` 的一条独立 reviewer。只评审，不修改任何文件；不要调用 `dual-review`、其他 skill 或其他评审 agent；不得读取或外传 `.env`、密钥、token、数据库、用户数据、生产日志和无关私有内容。」
-- 对有仓库读取能力的 reviewer，要求对照真实代码、配置、测试、样例输出和下游消费方，不只检查 diff 或文档自洽性。Codex 宿主的外部 Claude 只能依据自包含快照；快照缺少结论所必需的材料时，必须单列「上下文不足」，不得臆测。
+- 对有仓库读取能力的 reviewer，要求对照真实代码、配置、测试、样例输出和下游消费方，不只检查 diff 或文档自洽性。Codex 宿主的外部 Claude 和 Antigravity 宿主的外部 Codex 都依据自包含快照。快照缺少结论所必需的材料时，必须单列「上下文不足」。
 - 中文输出，按 Critical / Important / Suggestion 分级；每条写清「问题 → 影响 → 建议改法」并附文件路径和行号证据。
 - 若 reviewer 处于 plan mode，明确要求它不创建计划文件、不调用 `ExitPlanMode`，直接输出评审结论。
 - 最后给出单一 gate 结论：可进入实现 / 需修改后再进入实现；代码评审对应为可合并 / 需修改后再合并。
@@ -80,12 +81,13 @@ $dual-review
 
 ## 步骤 2：识别宿主并启动两路
 
-根据当前系统身份和实际可调用工具识别宿主，不根据仓库名、skill 路径或猜测判断：
+优先使用系统声明的当前宿主。系统未声明时，只根据宿主专属工具识别；工具不可用时记录对应路线的缺口。仓库名、skill 路径、终端里的可执行文件和编辑器界面都不能用于识别当前 agent 的宿主。
 
-- 系统声明当前为 Claude Code，或提供 Claude Code 的 subagent 工具（如 `Agent` / `Task`）→ 走 Claude Code 路径；`codex:codex-rescue` 是否可用只决定外部路能否启动，不改变宿主判断。
-- 系统声明当前为 Codex，或提供 Codex subagent/collaboration 工具（如 `spawn_agent`、`wait_agent`）→ 走 Codex 路径。
-- 工具与身份冲突时，以系统声明的当前宿主为准，并报告缺失的那一路；不要试调用另一宿主的专属入口。
-- 无法判定为 Claude Code 或 Codex 时，只运行可确认的内部评审，按步骤 4 降级为单路并说明宿主未知；不得猜测外部入口。
+- Claude Code → 走 Claude Code 路径。专属工具示例为 Claude Code 的 `Agent` / `Task`。
+- Codex → 走 Codex 路径。专属工具示例为 Codex 的 `spawn_agent` / `wait_agent`。
+- Antigravity → 走 Antigravity 路径。专属工具示例为 Antigravity 的 `invoke_subagent`。
+- 外部评审入口不可用时，保留当前宿主判定和可运行的内部评审。
+- 无法识别宿主时，只运行可确认的内部评审，按步骤 4 报告为单路评审并注明宿主未知。
 
 ### Claude Code 路径
 
@@ -145,6 +147,62 @@ helper 以独立后台进程运行 `claude -p`，启用 `--safe-mode`、`--permi
 - 安装、升级或修改 Antigravity helper 后还必须运行 `<python-exe> "<skill-dir>/scripts/run_antigravity_review.py" self-test`。该自测不调用 `agy`；交付前若本机已安装并认证 `agy`，再用无敏感内容的最小 prompt 做一次真实冒烟。真实冒烟因网络、认证或额度不可用时必须明确报告，不得用离线自测冒充。
 - 非 Windows 平台若 Codex 沙箱阻止启动独立后台进程或写入系统临时目录，在遵守上面“同一用户、同一临时目录根”的前提下，按宿主审批机制申请最小范围提权后原样重试；Windows 必须遵守上面的首次调用即最小提权规则。
 
+### Antigravity 路径
+
+1. **Antigravity 内部评审**：用当前宿主的 `invoke_subagent` 在后台启动独立 reviewer，继承当前 workspace，传入完整评审范围，并在支持时将工具限定为只读。启动后立即进入外部路，无需等待内部结果。只有当前宿主无可用 subagent 时，才由当前 Antigravity agent 做内部评审。此时先后台启动外部路，在读取其结果前完成并记录内部意见。
+2. **Codex 外部评审**：使用已安装并认证的本地 Codex CLI。先用 `codex --version`、`codex --help`、`codex exec --help` 和 `codex features list` 核对以下参数与 feature 名称，再通过宿主的后台终端或 exec 会话立即启动一次。Windows 优先解析 `codex.exe`，也可使用已核实的原生可执行文件绝对路径。只用本节的 `codex exec` 入口。
+
+Codex 可在忽略用户配置时继续加载 `CODEX_HOME` 下的 `AGENTS.md` 和 `AGENTS.override.md`。启动前检查实际使用的 Codex home（未设置时为 `~/.codex`）。如果存在任一全局规则文件（包括符号链接）或无法确认它们不存在，使用用户提供的、无自定义规则且已单独认证的评审目录作为 Codex 子进程的 `CODEX_HOME`。若没有可用目录，按步骤 4 降级。保持原账户配置、认证文件和全局规则原样。
+
+用一次性 Python builder 按步骤 1 在内存中构造自包含的 `prompt`，包含经过敏感性预检的 diff、目标内容及必要上下文。复用 Codex 路径的 Git 安全参数捕获 diff。将下面的调用接在 builder 的 prompt 构造之后，`codex_exe` 为已核实的可执行文件路径，`reviewer_home` 为通过前述检查的绝对路径。完整 prompt 由 UTF-8 二进制 stdin 传输，禁止将 prompt、diff 或快照嵌入 builder、命令参数或调用方日志，或写入临时文件。
+
+```python
+for name in ("AGENTS.md", "AGENTS.override.md"):
+    try:
+        (reviewer_home / name).lstat()
+    except FileNotFoundError:
+        continue
+    raise RuntimeError("Codex review home contains global instructions")
+
+nonce = secrets.token_hex(16)
+start_receipt = f"DUAL_REVIEW_START_{nonce}"
+end_receipt = f"DUAL_REVIEW_END_{nonce}"
+review_input = (
+    "Use the exact first and last receipt lines below as the first and last "
+    "lines of your reply. Keep the review between them.\n"
+    f"{start_receipt}\n{prompt}\n{end_receipt}\n"
+).encode("utf-8")
+if len(review_input) > 500_000:
+    raise ValueError("Codex review input exceeds 500,000 UTF-8 bytes")
+
+with tempfile.TemporaryDirectory(prefix="dual-review-codex-") as work_dir:
+    result = subprocess.run(
+        [
+            codex_exe, "--no-daemon", "-a", "never", "exec",
+            "--sandbox", "read-only", "--skip-git-repo-check",
+            "--ignore-user-config", "--ephemeral", "--strict-config",
+            "-c", 'web_search="disabled"', "-c", "mcp_servers={}",
+            "-c", "project_doc_max_bytes=0", "-c", "skills.bundled.enabled=false",
+            "-c", "skills.include_instructions=false", "-c", "skills.max_context_tokens=1",
+            "--enable", "skip_host_skill_discovery", "--disable", "skill_search",
+            "--disable", "shell_tool", "--disable", "view_image",
+            "--disable", "multi_agent", "--disable", "multi_agent_v2",
+            "--disable", "hooks", "--disable", "plugins", "--disable", "apps",
+            "--disable", "memories", "--disable", "browser_use",
+            "--disable", "computer_use", "--disable", "image_generation",
+            "--color", "never", "-",
+        ],
+        cwd=work_dir,
+        env={**os.environ, "CODEX_HOME": str(reviewer_home)},
+        input=review_input,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=1800,
+    )
+```
+
+Codex 的工作目录是临时空目录。请求超过上限时，可删去无关上下文或拆成多组双路评审，每组两路仍使用同一范围。仅转发经 UTF-8 严格解码且通过回执检查的正文。CLI 可能将完整 stdin 回显到 stderr，原始 stderr 只在内存中检查，对外仅报告退出码或已识别的脱敏错误摘要。若宿主终端要求批准，使用宿主自身的审批机制，审批失败按步骤 4 降级。正常退出后清理 builder 和临时工作目录。发生超时或用户取消时，通过本轮宿主终端会话核实 Codex 及其子进程已退出，并检查临时文件清理结果。无法确认时按 pending 报告。
+
 ## 步骤 3：收集并汇总
 
 ### Claude Code 宿主
@@ -170,6 +228,12 @@ Claude helper 到达 `failed` 后，在 cleanup 前先运行 `classify-failure -
 - `safe_to_cleanup: true` 只说明缺少 worker 记录的早期启动失败可以安全清理，不代表评审成功。
 - `orphaned: true` 或 `state=unknown` 表示进程身份或生命周期仍不确定，必须按上面的 PID/权限流程核实，不能重启、清理或判定成功。
 
+### Antigravity 宿主
+
+同时跟踪 Antigravity 内部 reviewer 与 Codex CLI 会话。若由当前 Antigravity agent 完成内部评审，先记录内部意见，再读取外部结果。等待 Codex 退出后，要求退出码为 0、stdout 为合法 UTF-8、首尾非空行精确匹配本轮回执，且回执之间有完整分级与 gate。去掉回执后再汇总正文。超时、取消、非零退出、编码错误或回执缺失均按步骤 4 报告。
+
+### 通用汇总规则
+
 任一路输出为空、缺少所要求的分级或 gate、或不含完整评审结论时，视为该路失败。
 
 两路成功后：
@@ -183,8 +247,9 @@ Claude helper 到达 `failed` 后，在 cleanup 前先运行 `classify-failure -
 ## 步骤 4：处理失败
 
 - **Claude 限额失败**：以 helper 的 `classify-failure` 为唯一自动 fallback 判据，不靠主 agent 自由解释错误文本。分类为限额且 cleanup 成功后，不等待 Claude 重置、不重跑 Claude，自动调用 Antigravity 的 Gemini 4 Neon（High）一次。分类不是限额、分类命令失败或 cleanup 未完成时不得调用 Antigravity。
-- **Antigravity 失败**：禁止自动改用其他模型、推理档位或 provider。报告单一错误 JSON 的 `error_kind`、实际 stderr/退出码；`cleanup_failed` 还必须报告 `primary_error_kind` 与精确 state/work dir，并在确认进程终态后交给 `sweep`，不得直接删除。`antigravity_missing` 时给出安装或 PATH 恢复方式，认证失败时提示先交互登录，模型不可用时报告固定 slug，不得删掉模型固定或放宽工具边界。该路评审未完成，不算已完成验证。
+- **Codex 宿主的 Antigravity 回退失败**：禁止自动改用其他模型、推理档位或 provider。报告单一错误 JSON 的 `error_kind`、实际 stderr/退出码；`cleanup_failed` 还必须报告 `primary_error_kind` 与精确 state/work dir，并在确认进程终态后交给 `sweep`，不得直接删除。`antigravity_missing` 时给出安装或 PATH 恢复方式，认证失败时提示先交互登录，模型不可用时报告固定 slug，不得删掉模型固定或放宽工具边界。该路评审未完成，不算已完成验证。
 - **Claude Code 宿主的 Codex 外部路失败**：若提示插件未安装或未认证，提示用户运行 `/codex:setup`。
+- **Antigravity 宿主的 Codex 外部路失败**：报告具体阻塞，例如终端不可用、CLI 未安装、参数不兼容、缺少通过检查的 Codex home、认证失败、超时或非零退出。诊断使用脱敏错误摘要。认证失败时提示用户在所选评审目录的 `CODEX_HOME` 环境中执行 `codex login`。保留内部评审，按单路交付。
 - **Codex 宿主的 Claude 外部路失败**：先报告 `start` 的 `error_kind`、实际 stderr 或退出码。命令不存在时说明需安装 Claude Code；未认证时先核对当前 `claude --help` 和 `claude auth --help`，再提示其中实际存在的登录入口，不写死或猜测子命令；Python 运行时过旧、base64/UTF-8 输入无效、CLI 契约不兼容或只找到非原生 launcher 时报告支持边界并停止。`cli_contract` 还应报告 helper 附带的 Claude 版本，不能以文案漂移为由跳过 fail-closed 检查；输入无效时检查 builder 是否用 `subprocess.run(..., input=base64.b64encode(...))` 直接传入不含换行或空白的 bytes，不得改用 PowerShell 文本管道、宽松解码或绕过工具禁用检查。`start` 返回非空 `state_dir` 时，仍须按步骤 3 清理或报告 cleanup 被拒绝。
 - **单路非限额失败**：可以用另一路结果收场，但必须明确降级为单路评审，并说明失败原因和未覆盖风险。
 - **两路都失败**：不输出“通过”结论；报告两路错误和恢复方式。

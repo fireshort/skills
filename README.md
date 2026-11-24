@@ -15,7 +15,7 @@ Skills 是一种结构化的指令集，可以被 AI Agent 加载并执行，从
 
 | Skill | 说明 |
 |-------|------|
-| [dual-review](./dual-review/) | 跨 Claude Code 与 Codex 的双重评审：当前宿主内部评审 + 另一产品外部评审，合并去重后呈现结果 |
+| [dual-review](./dual-review/) | 支持 Claude Code、Codex 和 Antigravity，合并宿主内部评审与另一产品的独立意见 |
 | [english-learning-card-image](./english-learning-card-image/) | 英语好句双语配图学习卡：生成、定向编辑、评估与提示词，强调清新风格、准确文字和记忆锚点 |
 | [xibin-douyin-script-extractor](./xibin-douyin-script-extractor/) | 抖音口播文案提取 — 把抖音视频链接转成带时间戳的文案 txt/json，支持火山引擎豆包、SenseVoice、faster-whisper 三种 ASR 后端 |
 
@@ -28,6 +28,11 @@ Skills 是一种结构化的指令集，可以被 AI Agent 加载并执行，从
 - Claude Code：
   1. 安装 OpenAI Codex 插件，运行 `/codex:setup` 完成 Codex CLI 的安装与认证。
   2. 当前插件的用户命令 `/codex:rescue` 由 `codex:codex-rescue` agent 实现。用户可手动运行 `/codex:rescue --wait "只回答 OK，不修改文件"` 做最小只读探测；命令正常返回 `OK` 才表示该 agent 可调用。skill 运行时只检查可用 agent 列表，不靠试调用探测。
+- Antigravity
+  1. 将 `dual-review` 放入工作区的 `.agents/skills/`，或全局的 `~/.gemini/config/skills/`。安装位置见 [Antigravity 官方文档](https://antigravity.google/docs/skills)。
+  2. 安装 Python 3 和 Codex CLI，并完成 `codex login`。Windows 上确认宿主终端能找到 `codex.exe`，或使用已核实的可执行文件绝对路径。[OpenAI Codex CLI 文档](https://learn.chatgpt.com/docs/developer-commands?surface=cli)
+  3. 如果平时使用的 `CODEX_HOME` 包含 `AGENTS.md` 或 `AGENTS.override.md`，为评审选一个没有全局规则的目录。在单独终端将该目录设为 `CODEX_HOME` 并执行 `codex login`，然后把目录路径提供给 Antigravity。
+  4. 在 Antigravity 中发起 `/dual-review`。Antigravity 负责内部评审，Codex CLI 在临时空目录中以只读模式评审经预检的快照。
 - Codex：
   1. 安装 Python 3.10 及以上版本；Windows 要求 CPython 3.12.4 及以上。
   2. 安装本机 Claude Code CLI。已有旧版 CLI 时可执行 `claude install stable` 安装原生构建。
